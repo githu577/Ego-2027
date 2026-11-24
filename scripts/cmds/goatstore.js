@@ -1,3 +1,5 @@
+// code from goatstore
+// api: https://store.cloudrx.cyou
 const fs = require("fs");
 const path = require("path");
 const axios = require("axios");
@@ -10,10 +12,10 @@ module.exports = {
   config: {
     name: "goatstore",
     aliases: ["gs", "cmdstore", "commandstore"],
-    version: "20.3.2",
+    version: "21.0.0",
     author: "rX",
-    countDown: 15,
     role: 2,
+    countDown: 15,
     shortDescription: "GoatBot Store — Search, AutoUpdate, Install, Upload, AutoSync",
     longDescription: "Browse, install, upload, and autosync GoatBot commands and events from the MiraiStore API. Auto-detects your cmds/events folder naming. The bare-menu shows only the daily-use commands — every subcommand lives here in the guide.",
     category: "system",
@@ -22,7 +24,9 @@ module.exports = {
         "{pn} — Menu / Notifications\n" +
         "{pn} <id | file name> — Search commands only\n" +
         "{pn} -a <name> — All files by an author\n" +
+        "{pn} -al <alias> — Search commands by alias\n" +
         "{pn} -c <goat|mirai|other|category> — Browse a framework or category\n" +
+        "{pn} -c goatcmd|goatevent|miraicmd|miraievent — Browse one file-type bucket\n" +
         "{pn} -e <name> — Search events\n" +
         "{pn} -e install <id> — Install as event\n" +
         "{pn} -e upload <fileName> — Upload an event file\n" +
@@ -33,24 +37,23 @@ module.exports = {
         "{pn} like <id> — Like\n" +
         "{pn} trend — Trending\n" +
         "{pn} upload <fileName> — Upload a command file\n" +
+        "{pn} -s — Settings (AutoSync, AutoUpdate, Frame)\n" +
         "{pn} sync — Manual sync\n" +
         "{pn} dirs — Show & re-detect cmds/events locations\n" +
         "Reply \"in\" to a single result — Install\n" +
         "Reply \"in <id>\" to a list result — Install"
     },
-    autoSync: true
+    autoSync: false
   }
 };
 
 const PRIMARY_BASE = (() => {
   const v = process.env.STORE_API_BASE;
-  return v && v.startsWith("http") ? v.replace(/\/$/, "") : "https://rx.agi.bd";
+  return v && v.startsWith("http") ? v.replace(/\/$/, "") : "https://store.cloudrx.cyou";
 })();
-const BACKUP_BASE = "https://xyr.is-a.dev";
 
-function shouldFailover(err) {
-  return !err.response || err.response.status >= 500;
-}
+const STORE_API_KEY = String(process.env.STORE_API_KEY || "").trim();
+const keyHeaders = () => (STORE_API_KEY ? { "x-api-key": STORE_API_KEY } : {});
 
 const REQ_WINDOW_MS = 10 * 1000;
 const REQ_MAX_PER_WINDOW = 12;
@@ -103,27 +106,16 @@ async function _send(makeReq, attempt = 0) {
 }
 
 async function storeGet(pathSuffix, config = {}) {
-  const cfg = { ...config, params: { ...(config.params || {}) } };
+  const cfg = { ...config, params: { ...(config.params || {}) }, headers: { ...(config.headers || {}), ...keyHeaders() } };
   if (!cfg.params.clientFp && !/clientFp=/.test(pathSuffix)) cfg.params.clientFp = BOT_FP;
-  try {
-    return await _send(() => axios.get(`${PRIMARY_BASE}${pathSuffix}`, cfg));
-  } catch (err) {
-    if (!shouldFailover(err)) throw err;
-    logError(`[goatstore] ${PRIMARY_BASE} failed, retrying via ${BACKUP_BASE}`);
-    return await _send(() => axios.get(`${BACKUP_BASE}${pathSuffix}`, cfg));
-  }
+  return _send(() => axios.get(`${PRIMARY_BASE}${pathSuffix}`, cfg));
 }
 
 async function storePost(pathSuffix, data, config = {}) {
   const body = { ...(data || {}) };
   if (!body.clientFp) body.clientFp = BOT_FP;
-  try {
-    return await _send(() => axios.post(`${PRIMARY_BASE}${pathSuffix}`, body, config));
-  } catch (err) {
-    if (!shouldFailover(err)) throw err;
-    logError(`[goatstore] ${PRIMARY_BASE} failed, retrying via ${BACKUP_BASE}`);
-    return await _send(() => axios.post(`${BACKUP_BASE}${pathSuffix}`, body, config));
-  }
+  const cfg = { ...config, headers: { ...(config.headers || {}), ...keyHeaders() } };
+  return _send(() => axios.post(`${PRIMARY_BASE}${pathSuffix}`, body, cfg));
 }
 
 async function checkAbuseGuard(senderID) {
@@ -153,20 +145,6 @@ let _updateCheckCache = null;
 const UPDATE_CHECK_INTERVAL = 1000 * 60 * 30;
 
 const MAX_EDITS_PER_MESSAGE = 5;
-
-function isBotAdmin(uid) {
-  try {
-    const cfg = global.GoatBot?.config || {};
-    const list = [...(cfg.adminBot || []), ...(cfg.superAdminBot || [])].map(String);
-    return list.includes(String(uid));
-  } catch (_) { return false; }
-}
-
-function safeFileName(name, fallback) {
-  const base = path.basename(String(name || "").replace(/\s+/g, "_")).replace(/[^A-Za-z0-9_.-]/g, "");
-  const clean = base.replace(/\.js$/i, "").replace(/^\.+/, "");
-  return (clean || fallback) + ".js";
-}
 
 function getPrefix(threadData) {
   try {
@@ -335,11 +313,14 @@ function fileNotFoundMsg(fileName, dirs, prefix) {
 
 async function checkSelfUpdate() {
   const now = Date.now();
+  if (_updateCheckCache && (now - _updateCheckCache.checkedAt) < UPDATE_CHECK_INTERVAL)
+    return _updateCheckCache.result;
   try {
     const res = await storeGet(`/miraistore/search?q=goatstore&limit=10&framework=goat&kind=command`);
     const cmds = Array.isArray(res.data?.commands) ? res.data.commands : [];
     const match =
-      cmds.find(c => c.name?.toLowerCase() === "goatstore" && c.author === module.exports.config.author);
+      cmds.find(c => c.name?.toLowerCase() === "goatstore" && c.author === module.exports.config.author) ||
+      cmds.find(c => c.name?.toLowerCase() === "goatstore");
     if (!match) { _updateCheckCache = { checkedAt: now, result: null }; return null; }
     const current = module.exports.config.version;
     const latest = match.version || "N/A";
@@ -374,33 +355,54 @@ async function getTrending(limit = 5) {
   return null;
 }
 
-const SYNC_MAX_PER_MINUTE = 2;
-const SYNC_WINDOW_MS = 60 * 1000;
-const _syncTimes = [];
-let _syncRunning = false;
+async function fetchBotAvatar(api) {
+  let botId = null;
+  try { botId = api.getCurrentUserID(); } catch (_) {}
+  if (!botId && global.GoatBot?.botID) botId = global.GoatBot.botID;
+  if (!botId) return null;
 
-async function waitSyncSlot() {
-  for (;;) {
-    const now = Date.now();
-    while (_syncTimes.length && now - _syncTimes[0] >= SYNC_WINDOW_MS) _syncTimes.shift();
-    if (_syncTimes.length < SYNC_MAX_PER_MINUTE) break;
-    await sleep(SYNC_WINDOW_MS - (now - _syncTimes[0]) + 200);
+  let info = null;
+  try {
+    const res = await api.getUserInfo(botId);
+    info = res && (res[botId] || res[String(botId)]) ? (res[botId] || res[String(botId)]) : res;
+  } catch (_) { return null; }
+  if (!info) return null;
+
+  const url =
+    info.thumbSrc ||
+    info.profileUrl ||
+    info.profilePictureUrl ||
+    info.imageSrc ||
+    info.image ||
+    info.avatar ||
+    (info.profilePicture && (info.profilePicture.uri || info.profilePicture.url)) ||
+    (info.thumbSrcBig) ||
+    null;
+  return typeof url === "string" && /^https?:\/\//i.test(url) ? url : null;
+}
+
+async function reportBotAvatar(api, { force = false } = {}) {
+  const author = module.exports.config.author;
+  if (!author) return;
+  try {
+    const avatarUrl = await fetchBotAvatar(api);
+    if (!avatarUrl) return;
+
+    if (!force) {
+      try {
+        const cur = await storeGet(`/miraistore/profile?author=${encodeURIComponent(author)}`);
+        if (cur.data && cur.data.avatarUrl === avatarUrl) return;
+      } catch (_) {}
+    }
+
+    await storePost(`/miraistore/profile`, { author, avatarUrl, clientFp: `avatar:${author}` });
+    log(`[goatstore] developer avatar reported for "${author}"`);
+  } catch (err) {
+    logError("[goatstore] avatar report failed:", err.response?.data?.error || err.message);
   }
-  _syncTimes.push(Date.now());
 }
 
 async function runAutoSync() {
-  if (_syncRunning) return false;
-  _syncRunning = true;
-  try {
-    await doAutoSync();
-    return true;
-  } finally {
-    _syncRunning = false;
-  }
-}
-
-async function doAutoSync() {
   const folders = [
     { dir: getCmdsDir(), kind: "command" },
     { dir: getEventsDir(), kind: "event" }
@@ -409,6 +411,16 @@ async function doAutoSync() {
   if (!folders.length) return;
 
   const cache = loadSyncCache();
+
+  let rewritesThisMinute = 0;
+  const paceRewrites = async (isRewrite) => {
+    if (!isRewrite) return;
+    rewritesThisMinute++;
+    if (rewritesThisMinute >= 2) {
+      await new Promise(r => setTimeout(r, 60 * 1000));
+      rewritesThisMinute = 0;
+    }
+  };
 
   for (const { dir, kind } of folders) {
     const files = fs.readdirSync(dir).filter(f => f.endsWith(".js"));
@@ -434,15 +446,16 @@ async function doAutoSync() {
                     || "Unknown";
         const category = content.match(/category\s*:\s*["'`](.*?)["'`]/)?.[1] || "Uncategorized";
         const stampedContent = await stampUploadCode(content);
-        await waitSyncSlot();
         const res = await storePost(`/miraistore/upload`, { rawCode: stampedContent, framework: "goat", kind, author, category });
         if (res.data?.error) {
           logError(`[goatstore-sync] Upload skipped for ${file}: ${res.data.message || res.data.error}`);
-          if (["Already exists", "Version already exists", "Version too low", "Upload blocked", "Not allowed"].includes(res.data.error))
-            cache[cacheKey] = hash;
+        } else if (res.data?.pending) {
+          log(`[goatstore-sync] ${file}: submitted for admin review.`);
+          cache[cacheKey] = hash;
         } else if (res.data?.updated) {
           log(`[goatstore-sync] ${file}: updated existing entry (ID: ${res.data.id}) to v${res.data.version}.`);
           cache[cacheKey] = hash;
+          await paceRewrites(true);
         } else {
           log(`[goatstore-sync] ${file}: uploaded as new entry (ID: ${res.data.id}).`);
           cache[cacheKey] = hash;
@@ -450,8 +463,6 @@ async function doAutoSync() {
       } catch (err) {
         logError(`[goatstore-sync] Upload request fail for ${file}:`, err.response?.data?.error || err.message);
       }
-
-      saveSyncCache(cache);
 
       await new Promise(r => setTimeout(r, 500));
     }
@@ -557,12 +568,10 @@ async function installCommand(api, threadID, senderID, id, forceKind = null) {
   let pid;
   try { pid = await animateInstall(api, threadID, displayName); } catch (_) {}
 
-  const fileName = safeFileName(displayName, `gs_${id}`);
+  const fileName = displayName.replace(/\s+/g, "_") + ".js";
   const baseDir = process.cwd();
   const installDir = isEvent ? getEventsDir() : getCmdsDir();
   const filePath = path.join(installDir, fileName);
-  if (path.dirname(path.resolve(filePath)) !== path.resolve(installDir))
-    return api.sendMessage("❌ Unsafe file name.", threadID);
   const locLabel = path.relative(baseDir, filePath);
 
   try {
@@ -614,6 +623,8 @@ async function doSelfUpdateSilent(api, threadID, selfUpdate) {
     fs.writeFileSync(__filename, cmdData.rawCode, "utf-8");
   } catch (_) { return false; }
 
+  _updateCheckCache = { checkedAt: Date.now(), result: { ...selfUpdate, hasUpdate: false } };
+
   try { await storePost(`/miraistore/install/${cmdData.id}`, { }); } catch (_) {}
 
   const changelog = (cmdData.description || cmdData.changelog || "No changelog provided.").trim();
@@ -634,6 +645,7 @@ async function doSelfUpdateSilent(api, threadID, selfUpdate) {
 
 async function maybeAutoUpdate(api, threadID) {
   if (_autoupdateInFlight) return;
+  if (!loadSettings().autoUpdate) return;
   const selfUpdate = await checkSelfUpdate();
   if (!selfUpdate?.hasUpdate) return;
   _autoupdateInFlight = true;
@@ -644,10 +656,257 @@ async function maybeAutoUpdate(api, threadID) {
   }
 }
 
+const SETTINGS_PATH = path.join(process.cwd(), "goatstore_settings.json");
+let _settingsCache = null;
+
+function loadSettings() {
+  const now = Date.now();
+  if (_settingsCache && now - _settingsCache.at < 1500) return _settingsCache.val;
+  let raw = {};
+  try { raw = JSON.parse(fs.readFileSync(SETTINGS_PATH, "utf8")); } catch (_) {}
+  const val = {
+    autoSync: typeof raw.autoSync === "boolean" ? raw.autoSync : module.exports.config.autoSync !== false,
+    autoUpdate: typeof raw.autoUpdate === "boolean" ? raw.autoUpdate : true,
+    frame: [1, 2, 3].includes(raw.frame) ? raw.frame : 1
+  };
+  _settingsCache = { at: now, val };
+  return val;
+}
+
+function saveSettings(val) {
+  _settingsCache = { at: Date.now(), val: { ...val } };
+  try { fs.writeFileSync(SETTINGS_PATH, JSON.stringify(val, null, 2)); } catch (_) {}
+}
+
+function skinFrame3(text) {
+  const lines = String(text).split("\n");
+  const out = [];
+  const kv = (t) => t.replace(/^(.+?) : +/, "$1: ");
+  let inBlock = false;
+  let blockId = null;
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    let m;
+
+    if (/^\s*╰‣ reply in <id> for install$/.test(line)) continue;
+
+    if ((m = line.match(/^╭─‣ (.*)$/))) {
+      inBlock = true;
+      blockId = null;
+      const c = m[1];
+      let title = c;
+      let first = null;
+      if (/ 〄$/.test(c)) {
+        title = "FILE INFO";
+        first = `Name: ${c.replace(/ 〄$/, "")}`;
+      } else if (/^.+? : /.test(c)) {
+        const key = c.match(/^(.+?) : /)[1];
+        title = /^name$/i.test(key) ? "FILE INFO" : /^\d+\./.test(key) ? "SETTINGS" : "INFO";
+        first = kv(c);
+      }
+      out.push(`╭─「 ${title} 」`, "│");
+      if (first) out.push(`│ ✧ ${first}`);
+      continue;
+    }
+
+    if (inBlock && (m = line.match(/^├‣ (.*)$/))) {
+      const idm = m[1].match(/^ID ?: *(\S+)/);
+      if (idm) blockId = idm[1];
+      out.push(`│ ✧ ${kv(m[1])}`);
+      continue;
+    }
+
+    if (inBlock && line === "╰────────────◊") {
+      inBlock = false;
+      const up = lines[i + 1] && lines[i + 1].match(/^ ✰ Upload : (.*)$/);
+      if (up) {
+        out.push("│", `│ ✰ Upload: ${up[1]}`);
+        out.push(blockId ? `╰─➤ Reply with ${blockId} to install` : "╰──────────➤");
+        i++;
+      } else {
+        out.push("╰──────────➤");
+      }
+      continue;
+    }
+
+    out.push(line.replace(/^╭‣ /, "╭─➤ "));
+  }
+  return out.join("\n");
+}
+
+function skinWith(text, frame) {
+  if (typeof text !== "string") return text;
+  if (frame === 3) return skinFrame3(text);
+  if (frame !== 2) return text;
+  return text
+    .replace(/├‣ ([^\n]*)\n╰────────────◊/g, "╰ $1")
+    .replace(/╭─‣ /g, "╭─❯ ")
+    .replace(/├‣ /g, "├ ")
+    .replace(/╰────────────◊/g, "╰")
+    .replace(/╭‣ /g, "╭ ")
+    .replace(/╰‣ /g, "╰ ");
+}
+
+function wrapApi(api) {
+  if (!api || api.__gsWrapped) return api;
+  const skin = (m) => {
+    const f = loadSettings().frame;
+    if (typeof m === "string") return skinWith(m, f);
+    if (m && typeof m.body === "string") return { ...m, body: skinWith(m.body, f) };
+    return m;
+  };
+  return new Proxy(api, {
+    get(target, prop) {
+      if (prop === "__gsWrapped") return true;
+      if (prop === "sendMessage") return (m, ...rest) => target.sendMessage(skin(m), ...rest);
+      if (prop === "editMessage") return (m, ...rest) => target.editMessage(skin(m), ...rest);
+      const v = target[prop];
+      return typeof v === "function" ? v.bind(target) : v;
+    }
+  });
+}
+
+function replayApi(api, noteID) {
+  let used = false;
+  return new Proxy(api, {
+    get(target, prop) {
+      if (prop === "sendMessage") {
+        return async (m, ...rest) => {
+          if (!used) {
+            used = true;
+            try { await target.editMessage(m, noteID); return { messageID: noteID }; } catch (_) {}
+          }
+          return target.sendMessage(m, ...rest);
+        };
+      }
+      const v = target[prop];
+      return typeof v === "function" ? v.bind(target) : v;
+    }
+  });
+}
+
+async function updateAndReplay({ api, event, args, threadData }) {
+  const selfUpdate = await checkSelfUpdate();
+  if (!selfUpdate?.hasUpdate) return false;
+  _autoupdateInFlight = true;
+  let noteID = null;
+  let fresh = null;
+  try {
+    const changelog = String(selfUpdate.description || "").trim();
+    const sent = await api.sendMessage(
+      `♻️ Auto-Updating GoatStore...\n` +
+      `╭─‣ v${selfUpdate.currentVersion} ➜ v${selfUpdate.latestVersion}\n` +
+      `├‣ ID : ${selfUpdate.latestId}\n` +
+      `╰────────────◊\n` +
+      (changelog ? `📝 Changelog:\n${changelog}\n\n` : "") +
+      `⏳ Please wait...`,
+      event.threadID
+    );
+    noteID = sent?.messageID || null;
+
+    const ok = await doSelfUpdateSilent(null, null, selfUpdate);
+    if (!ok) {
+      if (noteID) api.unsendMessage(noteID).catch(() => {});
+      return false;
+    }
+    await sleep(1200);
+
+    fresh = global.GoatBot?.commands?.get("goatstore");
+    if (!fresh || fresh === module.exports || typeof fresh.onStart !== "function") {
+      if (noteID) api.unsendMessage(noteID).catch(() => {});
+      return false;
+    }
+  } catch (_) {
+    if (noteID) api.unsendMessage(noteID).catch(() => {});
+    return false;
+  } finally {
+    _autoupdateInFlight = false;
+  }
+
+  try {
+    const target = noteID ? replayApi(api, noteID) : api;
+    await fresh.onStart({ api: target, event, args, threadData, __gsSkipUpdate: true });
+  } catch (_) {}
+  return true;
+}
+
+const FRAME_IDS = [1, 2, 3];
+
+function settingsView(s) {
+  const sample = `╭─‣ Command Name 〄\n├‣ ID : 12\n├‣ Author : rX\n╰────────────◊\n ✰ Upload : Wed Sep 09 2026`;
+  const top = skinWith(
+    `⚙️ GoatStore Settings\n\n` +
+    `╭─‣ 1. Auto Sync : ${s.autoSync ? "ON ✅" : "OFF ❌"}\n` +
+    `├‣ 2. Auto Update : ${s.autoUpdate ? "ON ✅" : "OFF ❌"}\n` +
+    `╰────────────◊\n\n` +
+    `🖼️ Frames`,
+    s.frame
+  );
+  const frames = FRAME_IDS.map((f, i) =>
+    `${i + 3}. Frame ${f}${s.frame === f ? " ✅ (current)" : ""}\n${skinWith(sample, f)}`
+  ).join("\n\n");
+  return `${top}\n\n${frames}\n\n💬 Reply 1-${FRAME_IDS.length + 2} to change`;
+}
+
+async function handleSettingsReply(rawApi, event, Reply) {
+  const { threadID, body, senderID } = event;
+  if (senderID !== Reply.senderID) return;
+  const t = String(body || "").trim();
+  const s = { ...loadSettings() };
+
+  if (t === "1") s.autoSync = !s.autoSync;
+  else if (t === "2") s.autoUpdate = !s.autoUpdate;
+  else if (/^\d+$/.test(t) && FRAME_IDS[Number(t) - 3]) s.frame = FRAME_IDS[Number(t) - 3];
+  else return;
+  saveSettings(s);
+
+  const text = settingsView(s);
+  let id = Reply.messageID;
+  try { await rawApi.editMessage(text, id); }
+  catch (_) {
+    try { const sent = await rawApi.sendMessage(text, threadID); id = sent.messageID; }
+    catch (__) { return; }
+  }
+  global.GoatBot.onReply.set(id, { ...Reply, messageID: id });
+}
+
 function typeBadge(cmd) {
   if (cmd.framework === "goat")  return cmd.kind === "event" ? "🐐 G-Event" : "🐐 G-Bot";
   if (cmd.framework === "mirai") return cmd.kind === "event" ? "🌌 Mirai-E" : "🌌 Mirai";
+  if (cmd.framework === "discord")  return cmd.kind === "event" ? "💬 D-Event" : "💬 Discord";
+  if (cmd.framework === "telegram") return cmd.kind === "event" ? "✈️ TG-Event" : "✈️ Telegram";
   return "📦 Other";
+}
+
+const BUCKET_ALIASES = {
+  goatcmd: "goat-command", goatcommand: "goat-command",
+  goatevent: "goat-event",
+  miraicmd: "mirai-command", miraicommand: "mirai-command",
+  miraievent: "mirai-event",
+  discordcmd: "discord-command", discordcommand: "discord-command",
+  discorde: "discord-event", discordevent: "discord-event",
+  tgcmd: "telegram-command", telegramcmd: "telegram-command",
+  tgevent: "telegram-event", telegramevent: "telegram-event",
+  other: "other", unsorted: "unsorted"
+};
+
+const BUCKET_LABELS = {
+  "goat-command": "GoatBot Commands",
+  "goat-event": "GoatBot Events",
+  "mirai-command": "Mirai Commands",
+  "mirai-event": "Mirai Events",
+  "discord-command": "Discord Commands",
+  "discord-event": "Discord Events",
+  "telegram-command": "Telegram Commands",
+  "telegram-event": "Telegram Events",
+  other: "Other / Scripts",
+  unsorted: "Unclassified"
+};
+
+function withReplyFooter(msg, total) {
+  if (total === 1) return msg.replace(/\n+$/, "\n") + `  ╰‣ reply in <id> for install`;
+  return msg + `╰‣ reply in <id> for install`;
 }
 
 function authorLine(cmd) {
@@ -695,7 +954,7 @@ async function sendListPage(api, threadID, senderID, kind, page, limit = 10, pre
     let msg = `📂 ${label} — Page ${page}/${totalPages} (${data.total} total)\n\n`;
         data.commands.forEach(cmd => { msg += listBlock(cmd); });
     if (totalPages > 1) msg += `⏤͟͟͞͞  Page ${page}/${totalPages}\n╭‣ React or reply p ${page + 1 <= totalPages ? page + 1 : page} for nxt pg\n`;
-    msg += `╰‣ reply in <id> for install`;
+    msg = withReplyFooter(msg, data.total);
 
     const finalMsg = msg.trim();
     const sent = await api.sendMessage(finalMsg, threadID);
@@ -708,8 +967,10 @@ async function sendListPage(api, threadID, senderID, kind, page, limit = 10, pre
 }
 
 function searchTitle(query, filterOpts) {
+  if (filterOpts.alias) return `🔎 Alias: "${query}"`;
   if (filterOpts.author) return `👤 Author: ${filterOpts.author}`;
   if (filterOpts.category && !query) return `📂 Category: ${filterOpts.category}`;
+  if (filterOpts.bucket && !query) return `📂 ${BUCKET_LABELS[filterOpts.bucket] || filterOpts.bucket}`;
   if (filterOpts.framework && !query) return `📂 Category: ${filterOpts.framework}`;
   if (filterOpts.kind === "event" && !query) return `📂 Events`;
   return `🔍 Search: "${query}"`;
@@ -721,6 +982,8 @@ async function sendSearchPage(api, threadID, senderID, query, page, limit = 5, p
     let qs = `/miraistore/search?limit=${limit}&offset=${offset}`;
     if (filterOpts.author) qs += `&author=${encodeURIComponent(filterOpts.author)}`;
     else qs += `&q=${encodeURIComponent(query || "")}`;
+    if (filterOpts.alias) qs += `&alias=1`;
+    if (filterOpts.bucket) qs += `&bucket=${filterOpts.bucket}`;
     if (filterOpts.framework) qs += `&framework=${filterOpts.framework}`;
     if (filterOpts.kind) qs += `&kind=${filterOpts.kind}`;
     if (filterOpts.category) qs += `&category=${encodeURIComponent(filterOpts.category)}`;
@@ -738,14 +1001,16 @@ async function sendSearchPage(api, threadID, senderID, query, page, limit = 5, p
     let msg = `${title} (${total} found)\n\n`;
     data.commands.forEach(cmd => { msg += resultBlock(cmd); });
     if (totalPages > 1) msg += `⏤͟͟͞͞  Page ${page}/${totalPages}\n╭‣ React or reply p ${page + 1 <= totalPages ? page + 1 : page} for nxt pg\n`;
-    msg += `╰‣ reply in <id> for install`;
+    msg = withReplyFooter(msg, total);
 
     const finalMsg = msg.trim();
     const sent = await api.sendMessage(finalMsg, threadID);
     const h = {
       commandName: "goatstore", messageID: sent.messageID, query,
       authorQuery: filterOpts.author || null, framework: filterOpts.framework || null,
+      bucket: filterOpts.bucket || null,
       kind: filterOpts.kind || null, category: filterOpts.category || null,
+      alias: filterOpts.alias || false,
       page, totalPages, limit, mode: "search", senderID, editCount: 0
     };
     global.GoatBot.onReply.set(sent.messageID, h);
@@ -766,7 +1031,7 @@ async function renderListPageInto(messageID, kind, page, limit, senderID = null)
   let msg = `📂 ${label} — Page ${page}/${totalPages} (${data.total} total)\n\n`;
   data.commands.forEach(cmd => { msg += listBlock(cmd); });
   if (totalPages > 1) msg += `⏤͟͟͞͞  Page ${page}/${totalPages}\n╭‣ React or reply p ${page + 1 <= totalPages ? page + 1 : page} for nxt pg\n`;
-  msg += `╰‣ reply in <id> for install`;
+  msg = withReplyFooter(msg, data.total);
   return { text: msg.trim(), totalPages };
 }
 
@@ -775,6 +1040,8 @@ async function renderSearchPageInto(query, page, limit, filterOpts = {}, senderI
   let qs = `/miraistore/search?limit=${limit}&offset=${offset}`;
   if (filterOpts.author) qs += `&author=${encodeURIComponent(filterOpts.author)}`;
   else qs += `&q=${encodeURIComponent(query || "")}`;
+  if (filterOpts.alias) qs += `&alias=1`;
+  if (filterOpts.bucket) qs += `&bucket=${filterOpts.bucket}`;
   if (filterOpts.framework) qs += `&framework=${filterOpts.framework}`;
   if (filterOpts.kind) qs += `&kind=${filterOpts.kind}`;
   if (filterOpts.category) qs += `&category=${encodeURIComponent(filterOpts.category)}`;
@@ -791,7 +1058,7 @@ async function renderSearchPageInto(query, page, limit, filterOpts = {}, senderI
   let msg = `${title} (${total} found)\n\n`;
   data.commands.forEach(cmd => { msg += resultBlock(cmd); });
   if (totalPages > 1) msg += `⏤͟͟͞͞  Page ${page}/${totalPages}\n╭‣ React or reply p ${page + 1 <= totalPages ? page + 1 : page} for nxt pg\n`;
-  msg += `╰‣ reply in <id> for install`;
+  msg = withReplyFooter(msg, total);
   return { text: msg.trim(), totalPages };
 }
 
@@ -847,6 +1114,19 @@ async function uploadFile(api, threadID, filePath, kind, senderID = null) {
       );
     }
 
+    if (res.data?.pending) {
+      const pmsg =
+        `⏳ Submitted For Review!\n` +
+        `╭─‣ Name : ${displayName}\n` +
+        `├‣ Version : ${res.data.version || "N/A"}\n` +
+        `├‣ Status : Pending admin approval\n` +
+        `╰────────────◊\n` +
+        `💡 ${res.data.message || "It will appear in the store once an admin approves it."}`;
+      if (pid) { try { await api.editMessage(pmsg, pid); } catch (_) { api.sendMessage(pmsg, threadID); } }
+      else api.sendMessage(pmsg, threadID);
+      return;
+    }
+
     const author  = data.match(/author\s*:\s*["'`](.*?)["'`]/)?.[1]
                  || data.match(/credits\s*:\s*["'`](.*?)["'`]/)?.[1]
                  || "Unknown";
@@ -891,29 +1171,38 @@ async function uploadFile(api, threadID, filePath, kind, senderID = null) {
 Object.assign(module.exports, {
   onLoad: function ({ api } = {}) {
     const jitter = (base, spread) => base + Math.floor(Math.random() * spread);
-    if (module.exports.config.autoSync) {
-      const ONE_DAY = 1000 * 60 * 60 * 24;
-      setTimeout(() => {
-        runAutoSync().catch(() => {});
-        setInterval(() => { runAutoSync().catch(() => {}); }, ONE_DAY);
-      }, jitter(9000, 30000));
+    const apiRef = api || global.GoatBot?.fcaApi;
+    if (apiRef) {
+      setTimeout(() => { reportBotAvatar(apiRef).catch(() => {}); }, jitter(4000, 6000));
+      setInterval(() => { reportBotAvatar(apiRef).catch(() => {}); }, 1000 * 60 * 60 * 24);
     }
+    setTimeout(() => {
+      maybeAutoUpdate(null, null).catch(() => {});
+      setInterval(() => { maybeAutoUpdate(null, null).catch(() => {}); }, UPDATE_CHECK_INTERVAL);
+    }, jitter(6000, 10000));
+    const ONE_DAY = 1000 * 60 * 60 * 24;
+    const scheduledSync = () => { if (loadSettings().autoSync) runAutoSync().catch(() => {}); };
+    setTimeout(() => {
+      scheduledSync();
+      setInterval(scheduledSync, ONE_DAY);
+    }, jitter(9000, 30000));
   },
 
-  onReply: async function ({ api, event, Reply }) {
-    const { threadID, senderID } = event;
-    const body = event.body;
-    if (typeof body !== "string") return;
+  onReply: async function ({ api: rawApi, event, Reply }) {
+    const api = wrapApi(rawApi);
+    const { threadID, body, senderID } = event;
+
+    if (Reply?.mode === "settings") return handleSettingsReply(rawApi, event, Reply);
 
     const inIdMatch = body.match(/^in\s+(\d+)$/i);
     const inBareMatch = /^in$/i.test(body.trim());
-    if ((inIdMatch || inBareMatch) && !isBotAdmin(senderID)) return;
     if (inIdMatch) return doInstall(api, threadID, senderID, inIdMatch[1], null);
     if (inBareMatch && Reply?.singleId) return doInstall(api, threadID, senderID, Reply.singleId, null);
+    if ((Reply?.mode === "search" || Reply?.mode === "list") && /^\d+$/.test(body.trim()))
+      return doInstall(api, threadID, senderID, body.trim(), null);
 
     const delMatch = body.match(/^(?:rmv|delete|remove)\s+(\S+)(?:\s+(\S+))?/i);
     if (delMatch) {
-      if (!isBotAdmin(senderID)) return;
       const [, delId, delSecret] = delMatch;
       try {
         const payload = delSecret ? { secret: delSecret, userID: senderID } : { userID: senderID };
@@ -923,9 +1212,9 @@ Object.assign(module.exports, {
       } catch (_) { return api.sendMessage("❌ Delete API error.", threadID); }
     }
 
-    const { mode, query, listType, authorQuery, framework, kind, category, page, totalPages, limit, senderID: origSender } = Reply;
+    const { mode, query, listType, authorQuery, framework, bucket, kind, category, alias, page, totalPages, limit, senderID: origSender } = Reply;
     if (senderID !== origSender) return;
-    const match = body.trim().match(/^(?:p|page)\s*(\d+)$/i);
+    const match = body.match(/^(?:page|p)\s*(\d+)$/i);
     if (!match) return;
     const newPage = parseInt(match[1]);
     if (newPage < 1 || newPage > totalPages)
@@ -933,10 +1222,11 @@ Object.assign(module.exports, {
     api.unsendMessage(Reply.messageID).catch(() => {});
     const prefix = getPrefix(event.threadData);
     if (mode === "list") await sendListPage(api, threadID, senderID, listType, newPage, limit, prefix);
-    else await sendSearchPage(api, threadID, senderID, query, newPage, limit, prefix, { author: authorQuery, framework, kind, category });
+    else await sendSearchPage(api, threadID, senderID, query, newPage, limit, prefix, { author: authorQuery, framework, bucket, kind, category, alias });
   },
 
-  onChat: async function ({ api, event }) {
+  onChat: async function ({ api: rawApi, event }) {
+    const api = wrapApi(rawApi);
     const { threadID, senderID, body, messageReply } = event;
     if (!body || !messageReply) return;
     const text = body.trim();
@@ -945,7 +1235,6 @@ Object.assign(module.exports, {
     const inBareMatch = /^in$/i.test(text);
     const rmvMatch = text.match(/^(?:rmv|remove)\s+(\d+)(?:\s+(\S+))?$/i);
     if (!inMatch && !inBareMatch && !rmvMatch) return;
-    if (!isBotAdmin(senderID)) return;
 
     let isBotMsg = false;
     try { isBotMsg = String(messageReply.senderID) === String(api.getCurrentUserID()); } catch (_) {}
@@ -970,10 +1259,11 @@ Object.assign(module.exports, {
     } catch (_) { return api.sendMessage("❌ Delete API error.", threadID); }
   },
 
-  onReaction: async function ({ api, event, Reaction }) {
+  onReaction: async function ({ api: rawApi, event, Reaction }) {
+    const api = wrapApi(rawApi);
     const { threadID, userID } = event;
 
-    const { mode, query, listType, authorQuery, framework, kind, category, page, totalPages, limit, senderID, messageID, editCount = 0 } = Reaction;
+    const { mode, query, listType, authorQuery, framework, bucket, kind, category, alias, page, totalPages, limit, senderID, messageID, editCount = 0 } = Reaction;
     if (userID !== senderID) return;
     if (page >= totalPages) return api.sendMessage("✅ Already on the last page.", threadID);
 
@@ -982,18 +1272,18 @@ Object.assign(module.exports, {
     try {
       const rendered = mode === "list"
         ? await renderListPageInto(messageID, listType, nextPage, limit, senderID)
-        : await renderSearchPageInto(query, nextPage, limit, { author: authorQuery, framework, kind, category }, senderID);
+        : await renderSearchPageInto(query, nextPage, limit, { author: authorQuery, framework, bucket, kind, category, alias }, senderID);
 
       if (!rendered) return api.sendMessage("❌ No results found for this page.", threadID);
 
       if (editCount >= MAX_EDITS_PER_MESSAGE) {
         const sent = await api.sendMessage(rendered.text, threadID);
-        const h = { commandName: "goatstore", messageID: sent.messageID, listType, query, authorQuery, framework, kind, category, page: nextPage, totalPages: rendered.totalPages, limit, mode, senderID, editCount: 0 };
+        const h = { commandName: "goatstore", messageID: sent.messageID, listType, query, authorQuery, framework, bucket, kind, category, alias, page: nextPage, totalPages: rendered.totalPages, limit, mode, senderID, editCount: 0 };
         global.GoatBot.onReply.set(sent.messageID, h);
         global.GoatBot.onReaction.set(sent.messageID, h);
       } else {
         await api.editMessage(rendered.text, messageID);
-        const h = { commandName: "goatstore", messageID, listType, query, authorQuery, framework, kind, category, page: nextPage, totalPages: rendered.totalPages, limit, mode, senderID, editCount: editCount + 1 };
+        const h = { commandName: "goatstore", messageID, listType, query, authorQuery, framework, bucket, kind, category, alias, page: nextPage, totalPages: rendered.totalPages, limit, mode, senderID, editCount: editCount + 1 };
         global.GoatBot.onReply.set(messageID, h);
         global.GoatBot.onReaction.set(messageID, h);
       }
@@ -1001,11 +1291,12 @@ Object.assign(module.exports, {
       api.unsendMessage(messageID).catch(() => {});
       const prefix = getPrefix(event.threadData);
       if (mode === "list") await sendListPage(api, threadID, senderID, listType, nextPage, limit, prefix);
-      else await sendSearchPage(api, threadID, senderID, query, nextPage, limit, prefix, { author: authorQuery, framework, kind, category });
+      else await sendSearchPage(api, threadID, senderID, query, nextPage, limit, prefix, { author: authorQuery, framework, bucket, kind, category, alias });
     }
   },
 
-  onStart: async function ({ api, event, args, threadData }) {
+  onStart: async function ({ api: rawApi, event, args, threadData, __gsSkipUpdate }) {
+    const api = wrapApi(rawApi);
     const { threadID, senderID } = event;
 
     const guard = await checkAbuseGuard(senderID);
@@ -1020,7 +1311,18 @@ Object.assign(module.exports, {
     const sub = args[0]?.toLowerCase() || null;
     const prefix = getPrefix(threadData || event?.threadData);
 
-    await maybeAutoUpdate(api, threadID).catch(() => {});
+    if (!__gsSkipUpdate && !_autoupdateInFlight && loadSettings().autoUpdate) {
+      const handled = await updateAndReplay({ api, event, args, threadData });
+      if (handled) return;
+    }
+
+    if (sub === "-s" || sub === "--settings" || sub === "setting" || sub === "settings") {
+      const sent = await rawApi.sendMessage(settingsView(loadSettings()), threadID);
+      global.GoatBot.onReply.set(sent.messageID, {
+        commandName: "goatstore", messageID: sent.messageID, mode: "settings", view: "main", senderID
+      });
+      return;
+    }
 
     if (!sub) {
       const updates = await getTodayUpdates(senderID);
@@ -1036,10 +1338,11 @@ Object.assign(module.exports, {
       const menuMsg =
         `📦 GoatStore\n\nUsage:\n` +
         `• ${prefix}gs <id | file name> \n` +
+        `• ${prefix}gs -al <alias> \n` +
         `• ${prefix}gs install <id> \n` +
         `• ${prefix}gs upload <fileName> \n` +
         `• ${prefix}gs trend — Trending\n` +
-        `• ${prefix}gs sync — Sync your files`;
+        `• ${prefix}gs -s — Settings`;
       await api.sendMessage(menuMsg, threadID);
       return;
     }
@@ -1056,10 +1359,10 @@ Object.assign(module.exports, {
     }
 
     if (sub === "sync") {
-      api.sendMessage(`🔄 Starting manual sync... (max ${SYNC_MAX_PER_MINUTE} files/minute)`, threadID);
+      api.sendMessage("🔄 Starting manual sync...", threadID);
       try {
-        const ran = await runAutoSync();
-        api.sendMessage(ran ? "✅ Sync complete." : "⏳ A sync is already running.", threadID);
+        await runAutoSync();
+        api.sendMessage("✅ Sync complete.", threadID);
       } catch (err) {
         api.sendMessage(`❌ Sync failed: ${err.message}`, threadID);
       }
@@ -1072,11 +1375,16 @@ Object.assign(module.exports, {
       const countJs = d => { try { return fs.readdirSync(d).filter(f => f.endsWith(".js")).length; } catch { return null; } };
       const cc = countJs(cmdsDir), ec = countJs(eventsDir);
       const msg =
-        `📁 Auto-detected Locations\n` +
-        `╭─‣ Commands : ${relDir(cmdsDir)}${cc !== null ? ` (${cc} .js files)` : " — not found"}\n` +
-        `├‣ Events    : ${relDir(eventsDir)}${ec !== null ? ` (${ec} .js files)` : " — not found"}\n` +
+        `📁 Detected Locations\n\n` +
+        `╭─‣ 📂 Commands\n` +
+        `├‣ Path : ${relDir(cmdsDir)}\n` +
+        `├‣ Files : ${cc !== null ? `${cc} .js` : "❌ not found"}\n` +
         `╰────────────◊\n` +
-        `♻️ Auto-detect re-ran • AutoSync: ${module.exports.config.autoSync ? "ON ✅" : "OFF ❌"}`;
+        `╭─‣ 📂 Events\n` +
+        `├‣ Path : ${relDir(eventsDir)}\n` +
+        `├‣ Files : ${ec !== null ? `${ec} .js` : "❌ not found"}\n` +
+        `╰────────────◊\n` +
+        `♻️ Re-scanned • AutoSync: ${loadSettings().autoSync ? "ON ✅" : "OFF ❌"}`;
       return api.sendMessage(msg, threadID);
     }
 
@@ -1196,13 +1504,25 @@ Object.assign(module.exports, {
       return sendSearchPage(api, threadID, senderID, "", 1, 5, prefix, { author: authorName });
     }
 
+    if (sub === "-al" || sub === "--alias" || sub === "alias") {
+      const aliasName = args.slice(1).join(" ");
+      if (!aliasName) return api.sendMessage(`❌ Usage: ${prefix}gs -al <alias>`, threadID);
+      return sendSearchPage(api, threadID, senderID, aliasName, 1, 5, prefix, { alias: true, kind: "command" });
+    }
+
     if (sub === "-c" || sub === "--cat" || sub === "--category" || sub === "cat" || sub === "category") {
       const catName = args[1];
       if (!catName)
-        return api.sendMessage(`❌ Usage: ${prefix}gs -c <goat|mirai|other|category name>`, threadID);
+        return api.sendMessage(
+          `❌ Usage: ${prefix}gs -c <goat|goatcmd|goatevent|mirai|miraicmd|miraievent|other|category name>`,
+          threadID
+        );
       const rest = args.slice(2).join(" ");
-      if (["goat", "mirai", "other"].includes(catName.toLowerCase()))
-        return sendSearchPage(api, threadID, senderID, rest, 1, 5, prefix, { framework: catName.toLowerCase() });
+      const lower = catName.toLowerCase();
+      if (BUCKET_ALIASES[lower])
+        return sendSearchPage(api, threadID, senderID, rest, 1, 5, prefix, { bucket: BUCKET_ALIASES[lower] });
+      if (["goat", "mirai", "discord", "telegram"].includes(lower))
+        return sendSearchPage(api, threadID, senderID, rest, 1, 5, prefix, { framework: lower });
       return sendSearchPage(api, threadID, senderID, rest, 1, 5, prefix, { category: catName });
     }
 
